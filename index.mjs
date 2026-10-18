@@ -38,7 +38,15 @@ const TYPES = {
 
 const http = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://x');
-  let file = normalize(join(ROOT, decodeURIComponent(url.pathname)));
+  // A broken address (bots try them) is a 400, not a crash that drops every player.
+  let path;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    res.writeHead(400).end();
+    return;
+  }
+  let file = normalize(join(ROOT, path));
   if (!file.startsWith(ROOT)) {
     res.writeHead(403).end();
     return;
@@ -72,7 +80,8 @@ const BAD = ['amk', 'aq', 'orospu', 'piç', 'sik', 'yarrak', 'göt', 'ibne', 'pe
 const filter = (s) => BAD.reduce((t, w) => t.replace(new RegExp(`(^|[^\\p{L}])${w}(?=[^\\p{L}]|$)`, 'giu'), (m, pre) => pre + '*'.repeat(w.length)), s);
 const clean = (s, max) => filter(String(s ?? '').replace(/[<>]/g, '').trim().slice(0, max));
 
-const wss = new WebSocketServer({ server: http });
+// A message far bigger than a pose with a voice clip in it is refused (it would be sent on to everyone).
+const wss = new WebSocketServer({ server: http, maxPayload: 1024 * 1024 });
 wss.on('connection', (ws) => {
   let me = null;
   let room = null;
@@ -84,6 +93,8 @@ wss.on('connection', (ws) => {
     } catch {
       return;
     }
+    // Only objects are messages ("null" or a bare number would throw below and stop the server).
+    if (msg === null || typeof msg !== 'object') return;
     if (msg.t === 'join' && !me) {
       roomName = clean(msg.room, 32).toLocaleLowerCase('tr-TR') || 'türkiye';
       room = rooms.get(roomName);
@@ -96,7 +107,8 @@ wss.on('connection', (ws) => {
         ws.close();
         return;
       }
-      me = { ws, id: nextId++, name: clean(msg.name, 20) || `Sürücü ${nextId}`, vehicle: clean(msg.vehicle, 40), character: clean(msg.character, 20), state: null, seen: Date.now() };
+      const id = nextId++;
+      me = { ws, id, name: clean(msg.name, 20) || `Sürücü ${id}`, vehicle: clean(msg.vehicle, 40), character: clean(msg.character, 20), state: null, seen: Date.now() };
       room.set(me.id, me);
       send(ws, {
         t: 'welcome',
