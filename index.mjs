@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { createHash } from 'node:crypto';
 
 const PORT = Number(process.env.PORT ?? 8080);
 const ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', 'dist');
@@ -54,9 +55,12 @@ const http = createServer((req, res) => {
   if (!existsSync(file) || statSync(file).isDirectory()) file = join(ROOT, 'index.html');
   if (!existsSync(file)) {
     // No web build beside it (the usual case in the cloud): a status page.
-    let players = 0;
-    for (const room of rooms.values()) players += room.size;
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(`Apex Drive sunucusu çalışıyor ✓ — şu an ${players} oyuncu, ${rooms.size} oda`);
+    const hours = ((Date.now() - wokeAt) / 3600000).toFixed(1);
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(
+      `Apex Drive sunucusu çalışıyor ✓ — şu an ${playersNow()} oyuncu, ${rooms.size} oda
+` +
+        `Sunucu ${hours} saattir uyanık: bu sürede ${seenPlayers.size} farklı oyuncu geldi, ${joins} kez girildi, aynı anda en çok ${peak} kişi oynadı.`,
+    );
     return;
   }
   res.writeHead(200, {
@@ -65,6 +69,18 @@ const http = createServer((req, res) => {
   });
   createReadStream(file).pipe(res);
 });
+
+// Who has come since the server woke (it forgets when it sleeps): each different player counted once,
+// by a hash of their address kept only in memory, and the most ever in at once.
+const seenPlayers = new Set();
+let peak = 0;
+let joins = 0;
+const wokeAt = Date.now();
+const playersNow = () => {
+  let n = 0;
+  for (const room of rooms.values()) n += room.size;
+  return n;
+};
 
 /** @type {Map<string, Map<number, {ws: import('ws').WebSocket, id: number, name: string, vehicle: string, character: string, state: unknown, seen: number}>>} */
 const rooms = new Map();
@@ -82,7 +98,9 @@ const clean = (s, max) => filter(String(s ?? '').replace(/[<>]/g, '').trim().sli
 
 // A message far bigger than a pose with a voice clip in it is refused (it would be sent on to everyone).
 const wss = new WebSocketServer({ server: http, maxPayload: 1024 * 1024 });
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const from = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();
+  const who = createHash('sha256').update(from).digest('hex').slice(0, 16);
   let me = null;
   let room = null;
   let roomName = '';
@@ -110,6 +128,9 @@ wss.on('connection', (ws) => {
       const id = nextId++;
       me = { ws, id, name: clean(msg.name, 20) || `Sürücü ${id}`, vehicle: clean(msg.vehicle, 40), character: clean(msg.character, 20), state: null, seen: Date.now() };
       room.set(me.id, me);
+      seenPlayers.add(who);
+      joins += 1;
+      peak = Math.max(peak, playersNow());
       send(ws, {
         t: 'welcome',
         id: me.id,
